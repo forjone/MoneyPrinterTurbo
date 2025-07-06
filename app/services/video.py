@@ -31,6 +31,47 @@ from app.models.schema import (
 from app.services.utils import video_effects
 from app.utils import utils
 
+# 视频质量配置 - 可根据需要调整
+class VideoQualityConfig:
+    # 临时文件编码设置
+    TEMP_BITRATE = "4000k"  # 临时文件码率
+    TEMP_PRESET = "faster"  # 临时文件预设
+    
+    # 合并文件编码设置
+    MERGE_BITRATE = "7000k"  # 合并文件码率
+    MERGE_PRESET = "medium"  # 合并文件预设
+    
+    # 最终文件编码设置
+    FINAL_BITRATE = "8000k"  # 最终文件码率
+    FINAL_PRESET = "slow"  # 最终文件预设
+    FINAL_CRF = "18"  # CRF值，18为高质量
+    
+    # 图片处理设置
+    IMAGE_BITRATE = "6000k"  # 图片转视频码率
+    IMAGE_PRESET = "medium"  # 图片转视频预设
+
+# 视频质量诊断工具
+def diagnose_video_quality(video_path: str):
+    """
+    诊断视频质量问题
+    """
+    try:
+        clip = VideoFileClip(video_path)
+        info = {
+            "path": video_path,
+            "duration": clip.duration,
+            "fps": clip.fps,
+            "size": clip.size,
+            "bitrate": getattr(clip, 'bitrate', 'Unknown'),
+            "codec": getattr(clip, 'codec', 'Unknown'),
+        }
+        clip.close()
+        logger.info(f"视频质量诊断: {utils.to_json(info)}")
+        return info
+    except Exception as e:
+        logger.error(f"视频质量诊断失败: {str(e)}")
+        return None
+
 class SubClippedVideoClip:
     def __init__(self, file_path, start_time=None, end_time=None, width=None, height=None, duration=None):
         self.file_path = file_path
@@ -224,8 +265,8 @@ def combine_videos(
                 logger=None, 
                 fps=fps, 
                 codec=video_codec, 
-                bitrate="2000k",  # 临时文件使用较低码率2Mbps，提升处理速度
-                preset="ultrafast",  # 使用最快编码预设
+                bitrate=VideoQualityConfig.TEMP_BITRATE,  # 使用配置的临时文件码率
+                preset=VideoQualityConfig.TEMP_PRESET,  # 使用配置的临时文件预设
                 threads=threads
             )
             
@@ -285,8 +326,8 @@ def combine_videos(
             temp_audiofile_path=output_dir,
             audio_codec=audio_codec,
             fps=fps,
-            bitrate="5000k",  # 设置码率为5Mbps，提高视频质量
-            preset="faster",  # 使用更快的编码预设
+            bitrate=VideoQualityConfig.MERGE_BITRATE,  # 使用配置的合并文件码率
+            preset=VideoQualityConfig.MERGE_PRESET,  # 使用配置的合并文件预设
         )
         
         # 清理资源
@@ -487,8 +528,16 @@ def generate_video(
         threads=params.n_threads or 2,
         logger=None,
         fps=fps,
-        bitrate="6000k",  # 设置码率为6Mbps，提高最终视频质量
-        preset="medium",  # 平衡速度和质量
+        bitrate=VideoQualityConfig.FINAL_BITRATE,  # 使用配置的最终文件码率
+        preset=VideoQualityConfig.FINAL_PRESET,  # 使用配置的最终文件预设
+        # 添加更多质量控制参数
+        ffmpeg_params=[
+            "-crf", VideoQualityConfig.FINAL_CRF,  # 使用配置的CRF值
+            "-profile:v", "high",  # 使用高质量配置文件
+            "-level", "4.1",  # 设置编码级别
+            "-pix_fmt", "yuv420p",  # 确保兼容性
+            "-movflags", "+faststart",  # 支持流式播放
+        ]
     )
     video_clip.close()
     del video_clip
@@ -534,7 +583,7 @@ def preprocess_video(materials: List[MaterialInfo], clip_duration=4):
 
             # Output the video to a file.
             video_file = f"{material.url}.mp4"
-            final_clip.write_videofile(video_file, fps=30, logger=None, bitrate="4000k")  # 设置码率为4Mbps
+            final_clip.write_videofile(video_file, fps=30, logger=None, bitrate=VideoQualityConfig.IMAGE_BITRATE, preset=VideoQualityConfig.IMAGE_PRESET)  # 使用配置的图片转视频质量
             close_clip(clip)
             material.url = video_file
             logger.success(f"image processed: {video_file}")
