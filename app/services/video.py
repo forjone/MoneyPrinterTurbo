@@ -588,3 +588,280 @@ def preprocess_video(materials: List[MaterialInfo], clip_duration=4):
             material.url = video_file
             logger.success(f"image processed: {video_file}")
     return materials
+
+# 一步到位的视频处理函数
+def generate_video_directly(
+    video_paths: List[str],
+    audio_file: str,
+    subtitle_path: str,
+    output_file: str,
+    params: VideoParams,
+    video_aspect: VideoAspect = VideoAspect.portrait,
+    video_concat_mode: VideoConcatMode = VideoConcatMode.random,
+    video_transition_mode: VideoTransitionMode = None,
+    max_clip_duration: int = 5,
+    threads: int = 2,
+) -> str:
+    """
+    一步到位生成最终视频，避免多次编码造成的质量损失
+    
+    Args:
+        video_paths: 视频文件路径列表
+        audio_file: 音频文件路径
+        subtitle_path: 字幕文件路径
+        output_file: 输出文件路径
+        params: 视频参数
+        video_aspect: 视频比例
+        video_concat_mode: 视频拼接模式
+        video_transition_mode: 视频转场模式
+        max_clip_duration: 最大片段时长
+        threads: 线程数
+    
+    Returns:
+        生成的视频文件路径
+    """
+    logger.info("🚀 开始一步到位视频生成流程")
+    
+    # 1. 准备音频和字幕
+    audio_clip = AudioFileClip(audio_file)
+    audio_duration = audio_clip.duration
+    
+    # 调整音频音量
+    audio_clip = audio_clip.with_effects([afx.MultiplyVolume(params.voice_volume)])
+    
+    # 2. 准备视频尺寸
+    aspect = VideoAspect(video_aspect)
+    video_width, video_height = aspect.to_resolution()
+    
+    # 3. 处理视频片段（内存中处理，不保存临时文件）
+    logger.info("📹 直接处理视频片段（跳过临时文件）")
+    processed_clips = []
+    video_duration = 0
+    
+    # 准备子片段列表
+    subclipped_items = []
+    for video_path in video_paths:
+        clip = VideoFileClip(video_path)
+        clip_duration = clip.duration
+        clip_w, clip_h = clip.size
+        close_clip(clip)
+        
+        start_time = 0
+        while start_time < clip_duration:
+            end_time = min(start_time + max_clip_duration, clip_duration)
+            if clip_duration - start_time >= max_clip_duration:
+                subclipped_items.append(SubClippedVideoClip(
+                    file_path=video_path, 
+                    start_time=start_time, 
+                    end_time=end_time, 
+                    width=clip_w, 
+                    height=clip_h
+                ))
+            start_time = end_time
+            if video_concat_mode.value == VideoConcatMode.sequential.value:
+                break
+    
+    # 随机排序
+    if video_concat_mode.value == VideoConcatMode.random.value:
+        random.shuffle(subclipped_items)
+    
+    # 4. 直接处理成最终可用的视频片段
+    video_clips = []
+    for i, subclipped_item in enumerate(subclipped_items):
+        if video_duration > audio_duration:
+            break
+            
+        logger.debug(f"直接处理片段 {i+1}: {subclipped_item.file_path}")
+        
+        try:
+            # 加载和处理片段
+            clip = VideoFileClip(subclipped_item.file_path).subclipped(
+                subclipped_item.start_time, subclipped_item.end_time
+            )
+            
+            # 调整尺寸
+            if clip.size != (video_width, video_height):
+                clip_ratio = clip.w / clip.h
+                video_ratio = video_width / video_height
+                
+                if clip_ratio == video_ratio:
+                    clip = clip.resized(new_size=(video_width, video_height))
+                else:
+                    if clip_ratio > video_ratio:
+                        scale_factor = video_width / clip.w
+                    else:
+                        scale_factor = video_height / clip.h
+                    
+                    new_width = int(clip.w * scale_factor)
+                    new_height = int(clip.h * scale_factor)
+                    
+                    background = ColorClip(size=(video_width, video_height), color=(0, 0, 0)).with_duration(clip.duration)
+                    clip_resized = clip.resized(new_size=(new_width, new_height)).with_position("center")
+                    clip = CompositeVideoClip([background, clip_resized])
+            
+            # 添加转场效果
+            if video_transition_mode and video_transition_mode.value != VideoTransitionMode.none.value:
+                shuffle_side = random.choice(["left", "right", "top", "bottom"])
+                if video_transition_mode.value == VideoTransitionMode.fade_in.value:
+                    clip = video_effects.fadein_transition(clip, 1)
+                elif video_transition_mode.value == VideoTransitionMode.fade_out.value:
+                    clip = video_effects.fadeout_transition(clip, 1)
+                elif video_transition_mode.value == VideoTransitionMode.slide_in.value:
+                    clip = video_effects.slidein_transition(clip, 1, shuffle_side)
+                elif video_transition_mode.value == VideoTransitionMode.slide_out.value:
+                    clip = video_effects.slideout_transition(clip, 1, shuffle_side)
+                elif video_transition_mode.value == VideoTransitionMode.shuffle.value:
+                    transition_funcs = [
+                        lambda c: video_effects.fadein_transition(c, 1),
+                        lambda c: video_effects.fadeout_transition(c, 1),
+                        lambda c: video_effects.slidein_transition(c, 1, shuffle_side),
+                        lambda c: video_effects.slideout_transition(c, 1, shuffle_side),
+                    ]
+                    shuffle_transition = random.choice(transition_funcs)
+                    clip = shuffle_transition(clip)
+            
+            # 限制片段时长
+            if clip.duration > max_clip_duration:
+                clip = clip.subclipped(0, max_clip_duration)
+            
+            video_clips.append(clip)
+            video_duration += clip.duration
+            
+        except Exception as e:
+            logger.error(f"处理片段失败: {str(e)}")
+            continue
+    
+    # 5. 如果视频时长不够，循环使用片段
+    if video_duration < audio_duration:
+        logger.info(f"视频时长不够，循环使用片段: {video_duration:.2f}s < {audio_duration:.2f}s")
+        base_clips = video_clips.copy()
+        import itertools
+        for clip in itertools.cycle(base_clips):
+            if video_duration >= audio_duration:
+                break
+            video_clips.append(clip)
+            video_duration += clip.duration
+    
+    # 6. 合并所有视频片段
+    logger.info("🎬 合并所有视频片段")
+    if not video_clips:
+        logger.error("没有可用的视频片段")
+        return None
+    
+    # 合并视频
+    if len(video_clips) == 1:
+        video_clip = video_clips[0]
+    else:
+        video_clip = concatenate_videoclips(video_clips)
+    
+    # 7. 添加字幕
+    if subtitle_path and os.path.exists(subtitle_path) and params.subtitle_enabled:
+        logger.info("📝 添加字幕")
+        
+        # 准备字体路径
+        font_path = ""
+        if not params.font_name:
+            params.font_name = "STHeitiMedium.ttc"
+        font_path = os.path.join(utils.font_dir(), params.font_name)
+        if os.name == "nt":
+            font_path = font_path.replace("\\", "/")
+        
+        def create_text_clip(subtitle_item):
+            params.font_size = int(params.font_size)
+            params.stroke_width = int(params.stroke_width)
+            phrase = subtitle_item[1]
+            max_width = video_width * 0.9
+            wrapped_txt, txt_height = wrap_text(
+                phrase, max_width=max_width, font=font_path, fontsize=params.font_size
+            )
+            
+            _clip = TextClip(
+                text=wrapped_txt,
+                font=font_path,
+                font_size=params.font_size,
+                color=params.text_fore_color,
+                bg_color=params.text_background_color,
+                stroke_color=params.stroke_color,
+                stroke_width=params.stroke_width,
+            )
+            
+            duration = subtitle_item[0][1] - subtitle_item[0][0]
+            _clip = _clip.with_start(subtitle_item[0][0]).with_end(subtitle_item[0][1]).with_duration(duration)
+            
+            if params.subtitle_position == "bottom":
+                _clip = _clip.with_position(("center", video_height * 0.95 - _clip.h))
+            elif params.subtitle_position == "top":
+                _clip = _clip.with_position(("center", video_height * 0.05))
+            elif params.subtitle_position == "custom":
+                margin = 10
+                max_y = video_height - _clip.h - margin
+                min_y = margin
+                custom_y = (video_height - _clip.h) * (params.custom_position / 100)
+                custom_y = max(min_y, min(custom_y, max_y))
+                _clip = _clip.with_position(("center", custom_y))
+            else:
+                _clip = _clip.with_position(("center", "center"))
+            
+            return _clip
+        
+        def make_textclip(text):
+            return TextClip(text=text, font=font_path, font_size=params.font_size)
+        
+        sub = SubtitlesClip(subtitles=subtitle_path, encoding="utf-8", make_textclip=make_textclip)
+        text_clips = []
+        for item in sub.subtitles:
+            clip = create_text_clip(subtitle_item=item)
+            text_clips.append(clip)
+        
+        video_clip = CompositeVideoClip([video_clip, *text_clips])
+    
+    # 8. 添加背景音乐
+    final_audio = audio_clip
+    bgm_file = get_bgm_file(bgm_type=params.bgm_type, bgm_file=params.bgm_file)
+    if bgm_file:
+        logger.info("🎵 添加背景音乐")
+        try:
+            bgm_clip = AudioFileClip(bgm_file).with_effects([
+                afx.MultiplyVolume(params.bgm_volume),
+                afx.AudioFadeOut(3),
+                afx.AudioLoop(duration=video_clip.duration),
+            ])
+            final_audio = CompositeAudioClip([audio_clip, bgm_clip])
+        except Exception as e:
+            logger.error(f"添加背景音乐失败: {str(e)}")
+    
+    # 9. 合成最终视频
+    video_clip = video_clip.with_audio(final_audio)
+    
+    # 10. 一次性输出最终视频（只编码一次！）
+    logger.info("💾 一次性输出最终视频")
+    output_dir = os.path.dirname(output_file)
+    
+    video_clip.write_videofile(
+        output_file,
+        audio_codec=audio_codec,
+        temp_audiofile_path=output_dir,
+        threads=threads,
+        logger=None,
+        fps=fps,
+        bitrate=VideoQualityConfig.FINAL_BITRATE,
+        preset=VideoQualityConfig.FINAL_PRESET,
+        ffmpeg_params=[
+            "-crf", VideoQualityConfig.FINAL_CRF,
+            "-profile:v", "high",
+            "-level", "4.1",
+            "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart",
+        ]
+    )
+    
+    # 11. 清理资源
+    for clip in video_clips:
+        close_clip(clip)
+    close_clip(video_clip)
+    close_clip(audio_clip)
+    if 'bgm_clip' in locals():
+        close_clip(bgm_clip)
+    
+    logger.success("✅ 一步到位视频生成完成")
+    return output_file

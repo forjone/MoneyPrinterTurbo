@@ -157,8 +157,19 @@ def get_video_materials(task_id, params, video_terms, audio_duration):
 
 
 def generate_final_videos(
-    task_id, params, downloaded_videos, audio_file, subtitle_path
+    task_id, params, downloaded_videos, audio_file, subtitle_path, use_direct_generation=True
 ):
+    """
+    生成最终视频
+    
+    Args:
+        task_id: 任务ID
+        params: 视频参数
+        downloaded_videos: 下载的视频列表
+        audio_file: 音频文件路径
+        subtitle_path: 字幕文件路径
+        use_direct_generation: 是否使用一步到位生成（默认True）
+    """
     final_video_paths = []
     combined_video_paths = []
     video_concat_mode = (
@@ -169,40 +180,67 @@ def generate_final_videos(
     _progress = 50
     for i in range(params.video_count):
         index = i + 1
-        combined_video_path = path.join(
-            utils.task_dir(task_id), f"combined-{index}.mp4"
-        )
-        logger.info(f"\n\n## combining video: {index} => {combined_video_path}")
-        video.combine_videos(
-            combined_video_path=combined_video_path,
-            video_paths=downloaded_videos,
-            audio_file=audio_file,
-            video_aspect=params.video_aspect,
-            video_concat_mode=video_concat_mode,
-            video_transition_mode=video_transition_mode,
-            max_clip_duration=params.video_clip_duration,
-            threads=params.n_threads,
-        )
-
-        _progress += 50 / params.video_count / 2
-        sm.state.update_task(task_id, progress=_progress)
-
         final_video_path = path.join(utils.task_dir(task_id), f"final-{index}.mp4")
+        
+        if use_direct_generation:
+            # 使用一步到位生成方法
+            logger.info(f"\n\n## 一步到位生成视频: {index} => {final_video_path}")
+            
+            result = video.generate_video_directly(
+                video_paths=downloaded_videos,
+                audio_file=audio_file,
+                subtitle_path=subtitle_path,
+                output_file=final_video_path,
+                params=params,
+                video_aspect=params.video_aspect,
+                video_concat_mode=video_concat_mode,
+                video_transition_mode=video_transition_mode,
+                max_clip_duration=params.video_clip_duration,
+                threads=params.n_threads,
+            )
+            
+            if result:
+                final_video_paths.append(final_video_path)
+                # 对于一步到位方法，不需要合并文件
+                combined_video_paths.append(None)
+            
+            _progress += 100 / params.video_count
+            sm.state.update_task(task_id, progress=_progress)
+            
+        else:
+            # 使用传统的多步骤方法
+            combined_video_path = path.join(
+                utils.task_dir(task_id), f"combined-{index}.mp4"
+            )
+            logger.info(f"\n\n## combining video: {index} => {combined_video_path}")
+            video.combine_videos(
+                combined_video_path=combined_video_path,
+                video_paths=downloaded_videos,
+                audio_file=audio_file,
+                video_aspect=params.video_aspect,
+                video_concat_mode=video_concat_mode,
+                video_transition_mode=video_transition_mode,
+                max_clip_duration=params.video_clip_duration,
+                threads=params.n_threads,
+            )
 
-        logger.info(f"\n\n## generating video: {index} => {final_video_path}")
-        video.generate_video(
-            video_path=combined_video_path,
-            audio_path=audio_file,
-            subtitle_path=subtitle_path,
-            output_file=final_video_path,
-            params=params,
-        )
+            _progress += 50 / params.video_count / 2
+            sm.state.update_task(task_id, progress=_progress)
 
-        _progress += 50 / params.video_count / 2
-        sm.state.update_task(task_id, progress=_progress)
+            logger.info(f"\n\n## generating video: {index} => {final_video_path}")
+            video.generate_video(
+                video_path=combined_video_path,
+                audio_path=audio_file,
+                subtitle_path=subtitle_path,
+                output_file=final_video_path,
+                params=params,
+            )
 
-        final_video_paths.append(final_video_path)
-        combined_video_paths.append(combined_video_path)
+            _progress += 50 / params.video_count / 2
+            sm.state.update_task(task_id, progress=_progress)
+
+            final_video_paths.append(final_video_path)
+            combined_video_paths.append(combined_video_path)
 
     return final_video_paths, combined_video_paths
 
@@ -302,7 +340,7 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
 
     # 6. Generate final videos
     final_video_paths, combined_video_paths = generate_final_videos(
-        task_id, params, downloaded_videos, audio_file, subtitle_path
+        task_id, params, downloaded_videos, audio_file, subtitle_path, params.use_direct_generation
     )
 
     if not final_video_paths:

@@ -103,6 +103,9 @@ class VideoParams(BaseModel):
     stroke_width: float = 1.5
     n_threads: Optional[int] = 4  # 增加默认线程数提升性能
     paragraph_number: Optional[int] = 1
+    
+    # 视频生成方法选择
+    use_direct_generation: Optional[bool] = True  # 是否使用一步到位生成（默认启用）
 
 
 class SubtitleRequest(BaseModel):
