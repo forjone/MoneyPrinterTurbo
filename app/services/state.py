@@ -43,12 +43,20 @@ class MemoryState(BaseState):
         if progress > 100:
             progress = 100
 
-        self._tasks[task_id] = {
-            "task_id": task_id,
+        # 获取现有任务数据，如果不存在则创建新的
+        if task_id in self._tasks:
+            task_data = self._tasks[task_id].copy()
+        else:
+            task_data = {"task_id": task_id}
+        
+        # 只更新传入的字段，保留现有数据
+        task_data.update({
             "state": state,
             "progress": progress,
             **kwargs,
-        }
+        })
+        
+        self._tasks[task_id] = task_data
 
     def get_task(self, task_id: str):
         return self._tasks.get(task_id, None)
