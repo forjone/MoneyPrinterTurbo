@@ -1,6 +1,7 @@
 import os
 import platform
 import sys
+import time
 from uuid import uuid4
 
 import streamlit as st
@@ -138,6 +139,99 @@ def open_task_folder(task_id):
                 os.system(f"open {path}")
     except Exception as e:
         logger.error(e)
+
+
+def get_all_tasks():
+    """获取所有任务"""
+    tasks = []
+    tasks_dir = os.path.join(root_dir, "storage", "tasks")
+    if not os.path.exists(tasks_dir):
+        return tasks
+    
+    for task_id in os.listdir(tasks_dir):
+        task_path = os.path.join(tasks_dir, task_id)
+        if os.path.isdir(task_path):
+            # 获取任务创建时间
+            try:
+                create_time = os.path.getctime(task_path)
+                create_time_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(create_time))
+            except:
+                create_time_str = "未知"
+            
+            # 获取任务文件
+            files = []
+            for file_name in os.listdir(task_path):
+                file_path = os.path.join(task_path, file_name)
+                if os.path.isfile(file_path):
+                    try:
+                        file_size = os.path.getsize(file_path)
+                        file_size_str = format_file_size(file_size)
+                    except:
+                        file_size_str = "未知"
+                    
+                    files.append({
+                        "name": file_name,
+                        "path": file_path,
+                        "size": file_size_str,
+                        "type": get_file_type(file_name)
+                    })
+            
+            tasks.append({
+                "id": task_id,
+                "path": task_path,
+                "create_time": create_time_str,
+                "files": files
+            })
+    
+    # 按创建时间排序
+    tasks.sort(key=lambda x: x["create_time"], reverse=True)
+    return tasks
+
+
+def get_file_type(filename):
+    """根据文件扩展名判断文件类型"""
+    ext = filename.lower().split('.')[-1] if '.' in filename else ""
+    
+    if ext in ['mp4', 'avi', 'mov', 'mkv', 'flv', 'webm']:
+        return "video"
+    elif ext in ['mp3', 'wav', 'flac', 'aac', 'm4a']:
+        return "audio"
+    elif ext in ['srt', 'ass', 'vtt']:
+        return "subtitle"
+    elif ext in ['jpg', 'jpeg', 'png', 'gif', 'bmp']:
+        return "image"
+    elif ext in ['txt', 'log']:
+        return "text"
+    else:
+        return "other"
+
+
+def format_file_size(size_bytes):
+    """格式化文件大小"""
+    if size_bytes == 0:
+        return "0 B"
+    
+    size_names = ["B", "KB", "MB", "GB", "TB"]
+    i = 0
+    while size_bytes >= 1024 and i < len(size_names) - 1:
+        size_bytes /= 1024.0
+        i += 1
+    
+    return f"{size_bytes:.1f} {size_names[i]}"
+
+
+def delete_task(task_id):
+    """删除任务"""
+    try:
+        import shutil
+        task_path = os.path.join(root_dir, "storage", "tasks", task_id)
+        if os.path.exists(task_path):
+            shutil.rmtree(task_path)
+            return True
+        return False
+    except Exception as e:
+        logger.error(f"删除任务失败: {e}")
+        return False
 
 
 def scroll_to_bottom():
@@ -462,6 +556,110 @@ if not config.app.get("hide_config", False):
                 tr("Pixabay API Key"), value=pixabay_api_key, type="password"
             )
             save_keys_to_config("pixabay_api_keys", pixabay_api_key)
+
+# 添加侧边栏任务管理
+with st.sidebar:
+    st.header(tr("Task Manager"))
+    
+    # 刷新任务列表按钮
+    if st.button(tr("Refresh Tasks"), key="refresh_tasks"):
+        st.rerun()
+    
+    # 获取所有任务
+    tasks = get_all_tasks()
+    
+    if not tasks:
+        st.info(tr("No tasks found"))
+    else:
+        st.write(f"**{tr('All Tasks')}** ({len(tasks)})")
+        
+        # 搜索框
+        search_query = st.text_input(tr("Search Tasks"), key="search_tasks")
+        
+        # 过滤任务
+        filtered_tasks = tasks
+        if search_query:
+            filtered_tasks = [task for task in tasks if search_query.lower() in task["id"].lower()]
+        
+        # 显示任务列表
+        for task in filtered_tasks:
+            with st.expander(f"🎬 {task['id'][:8]}..."):
+                st.write(f"**{tr('Task ID')}:** {task['id']}")
+                st.write(f"**{tr('Created Time')}:** {task['create_time']}")
+                st.write(f"**{tr('Files')}:** {len(task['files'])}")
+                
+                # 操作按钮
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    if st.button(tr("Open in File Manager"), key=f"open_{task['id']}"):
+                        open_task_folder(task['id'])
+                
+                with col2:
+                    if st.button(tr("Show Details"), key=f"details_{task['id']}"):
+                        st.session_state[f"show_details_{task['id']}"] = not st.session_state.get(f"show_details_{task['id']}", False)
+                
+                with col3:
+                    if st.button(tr("Delete Task"), key=f"delete_{task['id']}"):
+                        if st.session_state.get(f"confirm_delete_{task['id']}", False):
+                            if delete_task(task['id']):
+                                st.success(tr("Task deleted successfully"))
+                                st.rerun()
+                            else:
+                                st.error(tr("Failed to delete task"))
+                        else:
+                            st.session_state[f"confirm_delete_{task['id']}"] = True
+                            st.warning(tr("Are you sure you want to delete this task?"))
+                            st.rerun()
+                
+                # 显示任务详情
+                if st.session_state.get(f"show_details_{task['id']}", False):
+                    st.write(f"**{tr('Task Details')}**")
+                    
+                    # 分类显示文件
+                    video_files = [f for f in task['files'] if f['type'] == 'video']
+                    audio_files = [f for f in task['files'] if f['type'] == 'audio']
+                    subtitle_files = [f for f in task['files'] if f['type'] == 'subtitle']
+                    other_files = [f for f in task['files'] if f['type'] not in ['video', 'audio', 'subtitle']]
+                    
+                    # 视频文件
+                    if video_files:
+                        st.write(f"**{tr('Video Files')}:**")
+                        for file in video_files:
+                            st.write(f"📹 {file['name']} ({file['size']})")
+                            if st.button(tr("Play Video"), key=f"play_{task['id']}_{file['name']}"):
+                                try:
+                                    st.video(file['path'])
+                                except Exception as e:
+                                    st.error(f"播放失败: {str(e)}")
+                    
+                    # 音频文件
+                    if audio_files:
+                        st.write(f"**{tr('Audio Files')}:**")
+                        for file in audio_files:
+                            st.write(f"🎵 {file['name']} ({file['size']})")
+                            try:
+                                st.audio(file['path'])
+                            except Exception as e:
+                                st.error(f"播放失败: {str(e)}")
+                    
+                    # 字幕文件
+                    if subtitle_files:
+                        st.write(f"**{tr('Subtitle Files')}:**")
+                        for file in subtitle_files:
+                            st.write(f"📝 {file['name']} ({file['size']})")
+                            if st.button(tr("View"), key=f"view_{task['id']}_{file['name']}"):
+                                try:
+                                    with open(file['path'], 'r', encoding='utf-8') as f:
+                                        content = f.read()
+                                        st.text_area("字幕内容", content, height=200)
+                                except Exception as e:
+                                    st.error(f"读取失败: {str(e)}")
+                    
+                    # 其他文件
+                    if other_files:
+                        st.write(f"**{tr('Other Files')}:**")
+                        for file in other_files:
+                            st.write(f"📄 {file['name']} ({file['size']})")
 
 llm_provider = config.app.get("llm_provider", "").lower()
 panel = st.columns(3)
