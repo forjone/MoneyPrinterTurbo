@@ -219,7 +219,15 @@ def combine_videos(
                 
             # wirte clip to temp file
             clip_file = f"{output_dir}/temp-clip-{i+1}.mp4"
-            clip.write_videofile(clip_file, logger=None, fps=fps, codec=video_codec, bitrate="4000k")  # 设置码率为4Mbps
+            clip.write_videofile(
+                clip_file, 
+                logger=None, 
+                fps=fps, 
+                codec=video_codec, 
+                bitrate="2000k",  # 临时文件使用较低码率2Mbps，提升处理速度
+                preset="ultrafast",  # 使用最快编码预设
+                threads=threads
+            )
             
             close_clip(clip)
         
@@ -240,8 +248,8 @@ def combine_videos(
             video_duration += clip.duration
         logger.info(f"video duration: {video_duration:.2f}s, audio duration: {audio_duration:.2f}s, looped {len(processed_clips)-len(base_clips)} clips")
      
-    # merge video clips progressively, avoid loading all videos at once to avoid memory overflow
-    logger.info("starting clip merging process")
+    # 优化：使用一次性合并替代逐个合并，大幅提升性能
+    logger.info("starting optimized clip merging process")
     if not processed_clips:
         logger.warning("no clips available for merging")
         return combined_video_path
@@ -250,56 +258,55 @@ def combine_videos(
     if len(processed_clips) == 1:
         logger.info("using single clip directly")
         shutil.copy(processed_clips[0].file_path, combined_video_path)
-        delete_files(processed_clips)
+        delete_files([processed_clips[0].file_path])
         logger.info("video combining completed")
         return combined_video_path
     
-    # create initial video file as base
-    base_clip_path = processed_clips[0].file_path
-    temp_merged_video = f"{output_dir}/temp-merged-video.mp4"
-    temp_merged_next = f"{output_dir}/temp-merged-next.mp4"
+    # 一次性加载所有视频片段并合并
+    logger.info(f"loading {len(processed_clips)} clips for batch merging")
+    video_clips = []
     
-    # copy first clip as initial merged video
-    shutil.copy(base_clip_path, temp_merged_video)
-    
-    # merge remaining video clips one by one
-    for i, clip in enumerate(processed_clips[1:], 1):
-        logger.info(f"merging clip {i}/{len(processed_clips)-1}, duration: {clip.duration:.2f}s")
+    try:
+        # 批量加载所有视频片段
+        for i, clip_info in enumerate(processed_clips):
+            logger.debug(f"loading clip {i+1}/{len(processed_clips)}: {clip_info.file_path}")
+            clip = VideoFileClip(clip_info.file_path)
+            video_clips.append(clip)
         
-        try:
-            # load current base video and next clip to merge
-            base_clip = VideoFileClip(temp_merged_video)
-            next_clip = VideoFileClip(clip.file_path)
-            
-            # merge these two clips
-            merged_clip = concatenate_videoclips([base_clip, next_clip])
-
-            # save merged result to temp file
-            merged_clip.write_videofile(
-                filename=temp_merged_next,
-                threads=threads,
-                logger=None,
-                temp_audiofile_path=output_dir,
-                audio_codec=audio_codec,
-                fps=fps,
-                bitrate="5000k",  # 设置码率为5Mbps，提高视频质量
-            )
-            close_clip(base_clip)
-            close_clip(next_clip)
-            close_clip(merged_clip)
-            
-            # replace base file with new merged file
-            delete_files(temp_merged_video)
-            os.rename(temp_merged_next, temp_merged_video)
-            
-        except Exception as e:
-            logger.error(f"failed to merge clip: {str(e)}")
-            continue
+        # 一次性合并所有片段
+        logger.info("concatenating all clips at once...")
+        merged_clip = concatenate_videoclips(video_clips)
+        
+        # 写入最终合并结果
+        merged_clip.write_videofile(
+            filename=combined_video_path,
+            threads=threads,
+            logger=None,
+            temp_audiofile_path=output_dir,
+            audio_codec=audio_codec,
+            fps=fps,
+            bitrate="5000k",  # 设置码率为5Mbps，提高视频质量
+            preset="faster",  # 使用更快的编码预设
+        )
+        
+        # 清理资源
+        for clip in video_clips:
+            close_clip(clip)
+        close_clip(merged_clip)
+        
+        logger.info("video combining completed successfully")
+        
+    except Exception as e:
+        logger.error(f"failed to merge clips: {str(e)}")
+        # 清理可能的残留资源
+        for clip in video_clips:
+            try:
+                close_clip(clip)
+            except:
+                pass
+        return None
     
-    # after merging, rename final result to target file name
-    os.rename(temp_merged_video, combined_video_path)
-    
-    # clean temp files
+    # 清理临时文件
     clip_files = [clip.file_path for clip in processed_clips]
     delete_files(clip_files)
             
@@ -481,6 +488,7 @@ def generate_video(
         logger=None,
         fps=fps,
         bitrate="6000k",  # 设置码率为6Mbps，提高最终视频质量
+        preset="medium",  # 平衡速度和质量
     )
     video_clip.close()
     del video_clip

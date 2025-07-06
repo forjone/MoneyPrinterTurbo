@@ -101,7 +101,7 @@ class VideoParams(BaseModel):
     font_size: int = 60
     stroke_color: Optional[str] = "#000000"
     stroke_width: float = 1.5
-    n_threads: Optional[int] = 2
+    n_threads: Optional[int] = 4  # 增加默认线程数提升性能
     paragraph_number: Optional[int] = 1
 
 
